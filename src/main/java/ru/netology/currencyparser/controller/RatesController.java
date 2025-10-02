@@ -1,55 +1,35 @@
+// controller/RateController.java
 package ru.netology.currencyparser.controller;
 
-import jakarta.validation.Valid;
-import org.springframework.http.ResponseEntity;
+import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
-import ru.netology.currencyparser.dto.CreateRateRequest;
-import ru.netology.currencyparser.dto.RateDto;
-import ru.netology.currencyparser.dto.UpdateRateRequest;
-import ru.netology.currencyparser.service.RateService;
+import ru.netology.currencyparser.domain.CurrencyRate;
+import ru.netology.currencyparser.repository.CurrencyRateRepository;
+import ru.netology.currencyparser.service.RateUpdateService;
 
+import java.time.LocalDate;
 import java.util.List;
 
 @RestController
 @RequestMapping("/api/rates")
+@RequiredArgsConstructor
 public class RatesController {
+    private final CurrencyRateRepository repo;
+    private final RateUpdateService updater;
 
-    private final RateService rateService;
-
-    public RatesController(RateService rateService) {
-        this.rateService = rateService;
+    @PostMapping("/update")
+    public int update(@RequestParam(required = false) String date) {
+        return updater.updateOnce(date==null? null : LocalDate.parse(date));
     }
 
-    // CRUD
-    @PostMapping
-    public ResponseEntity<RateDto> create(@RequestBody @Valid CreateRateRequest req) {
-        return ResponseEntity.ok(rateService.create(req));
+    @GetMapping                      // все курсы за сегодня
+    public List<CurrencyRate> today() {
+        return repo.findByAsOfDate(LocalDate.now());
     }
 
-    @PutMapping
-    public ResponseEntity<RateDto> update(@RequestBody @Valid UpdateRateRequest req) {
-        return ResponseEntity.ok(rateService.update(req));
-    }
-
-    @DeleteMapping("/{id}")
-    public ResponseEntity<Void> delete(@PathVariable Long id) {
-        rateService.delete(id);
-        return ResponseEntity.noContent().build();
-    }
-
-    @GetMapping("/{id}")
-    public ResponseEntity<RateDto> get(@PathVariable Long id) {
-        return ResponseEntity.ok(rateService.getById(id));
-    }
-
-    @GetMapping
-    public ResponseEntity<List<RateDto>> list() {
-        return ResponseEntity.ok(rateService.getAll());
-    }
-
-    // Импорт из внешнего источника (ЦБ)
-    @PostMapping("/import/cbr")
-    public ResponseEntity<List<RateDto>> importFromCbr() {
-        return ResponseEntity.ok(rateService.fetchLatestFromSource());
+    @GetMapping("/{code}")
+    public CurrencyRate latest(@PathVariable String code) {
+        return repo.findTopByCodeOrderByAsOfDateDesc(code.toUpperCase())
+                .orElseThrow(() -> new IllegalArgumentException("No data for "+code));
     }
 }
