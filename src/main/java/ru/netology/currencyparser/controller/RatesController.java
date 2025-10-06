@@ -1,4 +1,3 @@
-// controller/RateController.java
 package ru.netology.currencyparser.controller;
 
 import lombok.RequiredArgsConstructor;
@@ -9,6 +8,7 @@ import ru.netology.currencyparser.service.RateUpdateService;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/rates")
@@ -32,4 +32,11 @@ public class RatesController {
         return repo.findTopByCodeOrderByAsOfDateDesc(code.toUpperCase())
                 .orElseThrow(() -> new IllegalArgumentException("No data for "+code));
     }
+
+//    @PostMapping("/api/rates/import/latest-async")
+//    public Map<String, Object> importAsync() {
+//        rateService.startImportLatestAsync();
+//        return Map.of("status", "started");
+//    }
+//
 }

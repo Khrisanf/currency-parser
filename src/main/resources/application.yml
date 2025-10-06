@@ -19,3 +19,16 @@ demo:
 
 server:
   port: 8080
+
+app:
+  executors:
+    io:
+      # core-size:
+      # max-size:
+      # queue-capacity:
+      thread-name-prefix: "IO-"
+    cpu:
+      # core-size:
+      # max-size:
+      # queue-capacity:
+      thread-name-prefix: "CPU-"
