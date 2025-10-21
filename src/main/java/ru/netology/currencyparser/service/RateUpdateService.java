@@ -75,9 +75,14 @@ public class RateUpdateService {
 
     @Transactional
     protected LocalDate fetchAndResolve(LocalDate req) {
+        updateOnce(req);
+
+        LocalDate eff = repo.findMaxAsOfDateLe(req);
+        if (eff != null) return eff;
         updateOnce(null);
         return repo.findMaxAsOfDateLe(req);
     }
+
 
     @Transactional(readOnly = true)
     public List<CurrencyRate> getRatesEffectiveOn(LocalDate requested) {
