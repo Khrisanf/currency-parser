@@ -15,9 +15,10 @@ public interface CurrencyRateRepository extends JpaRepository<CurrencyRate, Long
 
     List<CurrencyRate> findByAsOfDate(LocalDate date);
 
-    Optional<CurrencyRate> findByCodeAndAsOfDate(String code, LocalDate date);
+    boolean existsByCodeAndAsOfDate(String code, LocalDate asOfDate);
 
-    // самая поздняя дата, не позже запрошенной
+    Optional<CurrencyRate> findTopByCodeAndAsOfDateLessThanOrderByAsOfDateDesc(String code, LocalDate asOfDate);
+
     @Query("select max(c.asOfDate) from CurrencyRate c where c.asOfDate <= :date")
     LocalDate findMaxAsOfDateLe(@Param("date") LocalDate date);
 }
