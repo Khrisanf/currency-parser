@@ -1,7 +1,7 @@
-// controller/RateController.java
 package ru.netology.currencyparser.controller;
 
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.*;
 import ru.netology.currencyparser.domain.CurrencyRate;
 import ru.netology.currencyparser.repository.CurrencyRateRepository;
@@ -22,10 +22,16 @@ public class RatesController {
         return updater.updateOnce(date==null? null : LocalDate.parse(date));
     }
 
-    @GetMapping                      // все курсы за сегодня
-    public List<CurrencyRate> today() {
-        return repo.findByAsOfDate(LocalDate.now());
+    @GetMapping // "актуально на сегодня"
+    public List<CurrencyRate> list() {
+        return updater.getRatesEffectiveOn(null);
     }
+
+    @GetMapping(params = "date")
+    public List<CurrencyRate> listOn(@RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+        return updater.getRatesEffectiveOn(date);
+    }
+
 
     @GetMapping("/{code}")
     public CurrencyRate latest(@PathVariable String code) {
