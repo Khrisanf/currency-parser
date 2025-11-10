@@ -82,6 +82,7 @@ public class RateUpdateService {
     }
 
     private int processBatch(List<CbrClient.CbrRate> batch, LocalDate asOf) {
+        log.info("batch start: size={}, date={}, thread={}", batch.size(), asOf, Thread.currentThread().getName());
         int saved = 0;
 
         for (CbrClient.CbrRate dto : batch) {
@@ -119,6 +120,7 @@ public class RateUpdateService {
         }
 
         log.info("Batch persisted: saved={}, date={}", saved, asOf);
+        log.info("batch done: saved={}, thread={}", saved, Thread.currentThread().getName());
         return saved;
     }
 
