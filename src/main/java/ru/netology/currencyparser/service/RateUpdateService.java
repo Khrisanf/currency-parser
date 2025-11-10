@@ -1,7 +1,5 @@
 package ru.netology.currencyparser.service;
 
-// package <твоя_пакетная_структура>;
-
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -40,10 +38,6 @@ public class RateUpdateService {
 
     @Value("${app.rates.batch-threads:3}")
     private int batchThreads;
-
-    public void updateOnce() {
-        updateOnce(null);
-    }
 
     public int updateOnce(LocalDate forcedDate) {
         List<CbrClient.CbrRate> list = cbrClient.fetchDaily(Optional.ofNullable(forcedDate));
