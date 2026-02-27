@@ -1,5 +1,6 @@
 package ru.netology.currencyparser.service;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -39,10 +40,13 @@ class RateUpdateServiceTest {
     @BeforeEach
     void setUp() {
         Executor sameThread = Runnable::run;
+        var meterRegistry = new SimpleMeterRegistry();
 
-        service = new RateUpdateService(cbrClient, repo, txManager, sameThread);
-
+        service = new RateUpdateService(cbrClient, repo, txManager, sameThread, meterRegistry);
+        ReflectionTestUtils.invokeMethod(service, "initMetrics");
         ReflectionTestUtils.setField(service, "batchThreads", 1);
+
+        when(txManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
     }
 
     @Test
