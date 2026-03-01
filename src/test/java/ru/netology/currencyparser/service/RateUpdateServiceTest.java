@@ -1,8 +1,11 @@
 package ru.netology.currencyparser.service;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -16,9 +19,11 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Executor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -39,10 +44,24 @@ class RateUpdateServiceTest {
     @BeforeEach
     void setUp() {
         Executor sameThread = Runnable::run;
+        var meterRegistry = new SimpleMeterRegistry();
+        var observationRegistry = ObservationRegistry.create();
 
-        service = new RateUpdateService(cbrClient, repo, txManager, sameThread);
+        service = new RateUpdateService(
+                cbrClient,
+                repo,
+                txManager,
+                sameThread,
+                meterRegistry,
+                observationRegistry
+        );
 
+        ReflectionTestUtils.invokeMethod(service, "initMetrics");
         ReflectionTestUtils.setField(service, "batchThreads", 1);
+
+        when(txManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+        doNothing().when(txManager).commit(any());
+        doNothing().when(txManager).rollback(any());
     }
 
     @Test
@@ -56,20 +75,27 @@ class RateUpdateServiceTest {
         when(dto.nominal()).thenReturn(1);
         when(dto.rate()).thenReturn(new BigDecimal("90.1234"));
 
-        // клиент вернул один курс
-        when(cbrClient.fetchDaily(Optional.ofNullable(null)))
+        when(cbrClient.fetchDaily(eq(Optional.empty())))
                 .thenReturn(List.of(dto));
 
-        // в БД такого курса ещё нет
-        when(repo.existsByCodeAndAsOfDate("USD", date)).thenReturn(false);
-        when(repo.findTopByCodeAndAsOfDateLessThanOrderByAsOfDateDesc("USD", date))
-                .thenReturn(Optional.empty());
+        // в БД на эту дату кода USD ещё нет
+        when(repo.findCodesByAsOfDateAndCodeIn(eq(date), argThat(s -> s != null && s.contains("USD"))))
+                .thenReturn(Set.of());
 
-        when(txManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+        when(repo.findAllPrevForCodes(eq(date), argThat(s -> s != null && s.contains("USD"))))
+                .thenReturn(List.of());
 
         int saved = service.updateOnce(null);
 
         assertEquals(1, saved);
-        verify(repo, times(1)).save(any(CurrencyRate.class));
+
+        ArgumentCaptor<List<CurrencyRate>> captor = ArgumentCaptor.forClass(List.class);
+        verify(repo, times(1)).saveAll(captor.capture());
+
+        List<CurrencyRate> batch = captor.getValue();
+        assertNotNull(batch);
+        assertEquals(1, batch.size());
+        assertEquals("USD", batch.get(0).getCode());
+        assertEquals(date, batch.get(0).getAsOfDate());
     }
 }
