@@ -129,16 +129,12 @@ public class RateUpdateService {
 
             log.info("CBR: {} items for {}, {} batches (threads={})",
                     list.size(), asOf, batches.size(), Math.min(batchThreads, list.size()));
-
-            // ✅ фикс: создаём snapshot, который будем протаскивать в потоки пула
             ContextSnapshot snapshot = ContextSnapshot.captureAll();
 
             List<CompletableFuture<Integer>> futures = new ArrayList<>(batches.size());
 
             for (List<CbrClient.CbrRate> batch : batches) {
                 List<CbrClient.CbrRate> safeCopy = new ArrayList<>(batch);
-
-                // ✅ фикс: явно делаем Callable<Integer>, тогда у результата есть .call()
                 Callable<Integer> task = snapshot.wrap(() ->
                         runInNewTx(() -> processBatch(safeCopy, asOf))
                 );
