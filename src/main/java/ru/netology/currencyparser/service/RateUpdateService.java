@@ -142,19 +142,37 @@ public class RateUpdateService {
         Timer.Sample batchSample = Timer.start(meterRegistry);
 
         log.info("batch start: size={}, date={}, thread={}", batch.size(), asOf, Thread.currentThread().getName());
-        int saved = 0;
 
         try {
+            if (batch.isEmpty()) {
+                log.info("batch done: saved=0, thread={}", Thread.currentThread().getName());
+                return 0;
+            }
+
+            // Собираем коды батча
+            Set<String> codes = new HashSet<>(batch.size());
+            for (CbrClient.CbrRate dto : batch) {
+                codes.add(dto.code());
+            }
+
+            Set<String> existingCodes = repo.findCodesByAsOfDateAndCodeIn(asOf, codes);
+
+            List<CurrencyRate> prevList = repo.findAllPrevForCodes(asOf, codes);
+            Map<String, java.math.BigDecimal> prevByCode = new HashMap<>();
+            for (CurrencyRate r : prevList) {
+                prevByCode.putIfAbsent(r.getCode(), r.getRateToRub());
+            }
+
+            // Готовим список новых сущностей без запросов в цикле
+            List<CurrencyRate> toSave = new ArrayList<>(batch.size());
             for (CbrClient.CbrRate dto : batch) {
                 final String code = dto.code();
-
-                if (repo.existsByCodeAndAsOfDate(code, asOf)) {
+                if (existingCodes.contains(code)) {
                     continue;
                 }
 
                 var curr = dto.rate();
-                var prevOpt = repo.findTopByCodeAndAsOfDateLessThanOrderByAsOfDateDesc(code, asOf);
-                var prev = prevOpt.map(CurrencyRate::getRateToRub).orElse(null);
+                var prev = prevByCode.get(code);
 
                 var changeAbs = (prev == null) ? java.math.BigDecimal.ZERO : curr.subtract(prev);
                 var changePct = (prev == null || prev.signum() == 0)
@@ -162,7 +180,7 @@ public class RateUpdateService {
                         : changeAbs.divide(prev, 8, RoundingMode.HALF_UP)
                         .multiply(java.math.BigDecimal.valueOf(100));
 
-                var entity = CurrencyRate.builder()
+                toSave.add(CurrencyRate.builder()
                         .code(code)
                         .name(dto.name())
                         .nominal(dto.nominal())
@@ -170,13 +188,18 @@ public class RateUpdateService {
                         .asOfDate(asOf)
                         .changeAbs(changeAbs)
                         .changePct(changePct)
-                        .build();
+                        .build());
+            }
 
+            // Одна пачка записи в БД
+            int saved = 0;
+            if (!toSave.isEmpty()) {
                 try {
-                    repo.save(entity);
-                    saved++;
+                    repo.saveAll(toSave);
+                    saved = toSave.size();
                 } catch (DataIntegrityViolationException ignore) {
                     dbConflicts.increment();
+                    saved = 0;
                 }
             }
 
@@ -186,6 +209,7 @@ public class RateUpdateService {
 
             log.info("Batch persisted: saved={}, date={}", saved, asOf);
             log.info("batch done: saved={}, thread={}", saved, Thread.currentThread().getName());
+            log.info("NEW BATCH LOGIC ENABLED");
             return saved;
 
         } finally {
