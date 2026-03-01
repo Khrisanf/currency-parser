@@ -3,8 +3,10 @@ package ru.netology.currencyparser.service;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import io.micrometer.context.ContextSnapshot;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 import jakarta.annotation.PostConstruct;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -23,42 +25,49 @@ import ru.netology.currencyparser.repository.CurrencyRateRepository;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.*;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class RateUpdateService {
 
     private final CbrClient cbrClient;
     private final CurrencyRateRepository repo;
     private final PlatformTransactionManager txManager;
-
-    @Qualifier("ioPool")
     private final Executor ioPool;
-
     private final MeterRegistry meterRegistry;
+    private final ObservationRegistry observationRegistry;
 
     @Value("${app.rates.batch-threads:3}")
     private int batchThreads;
 
-    // ===== Метрики (этап 1) =====
-    // время выполнения парсинга
+    // ===== Метрики =====
     private Timer updateTimer;
-    // таймер на батч
     private Timer batchTimer;
 
-    // успехи /  ошибки запусков парсинга
     private Counter updateSuccess;
     private Counter updateError;
 
-    // сколько записей попало в БД
     private Counter dbRowsInserted;
-
-    // сколько ушло конфликтами
     private Counter dbConflicts;
+
+    public RateUpdateService(CbrClient cbrClient,
+                             CurrencyRateRepository repo,
+                             PlatformTransactionManager txManager,
+                             @Qualifier("ioPool") Executor ioPool,
+                             MeterRegistry meterRegistry,
+                             ObservationRegistry observationRegistry) {
+        this.cbrClient = cbrClient;
+        this.repo = repo;
+        this.txManager = txManager;
+        this.ioPool = ioPool;
+        this.meterRegistry = meterRegistry;
+        this.observationRegistry = observationRegistry;
+    }
 
     @PostConstruct
     void initMetrics() {
@@ -90,10 +99,18 @@ public class RateUpdateService {
     }
 
     public int updateOnce(LocalDate forcedDate) {
+        return Observation.createNotStarted("cbr.updateOnce", observationRegistry)
+                .lowCardinalityKeyValue("forcedDate", String.valueOf(forcedDate))
+                .observe(() -> doUpdateOnce(forcedDate));
+    }
+
+    private int doUpdateOnce(LocalDate forcedDate) {
         Timer.Sample totalSample = Timer.start(meterRegistry);
 
         try {
-            List<CbrClient.CbrRate> list = cbrClient.fetchDaily(Optional.ofNullable(forcedDate));
+            List<CbrClient.CbrRate> list = Observation.createNotStarted("cbr.fetchDaily", observationRegistry)
+                    .observe(() -> cbrClient.fetchDaily(Optional.ofNullable(forcedDate)));
+
             if (list == null || list.isEmpty()) {
                 log.info("CBR: empty list for {}", forcedDate);
                 updateSuccess.increment();
@@ -102,20 +119,37 @@ public class RateUpdateService {
 
             LocalDate asOf = list.get(0).date();
 
-            int parts = Math.max(1, Math.min(batchThreads, list.size()));
-            int chunkSize = (int) Math.ceil(list.size() / (double) parts);
-            List<List<CbrClient.CbrRate>> batches = chunk(list, chunkSize);
+            List<List<CbrClient.CbrRate>> batches = Observation.createNotStarted("cbr.splitBatches", observationRegistry)
+                    .lowCardinalityKeyValue("items", String.valueOf(list.size()))
+                    .observe(() -> {
+                        int parts = Math.max(1, Math.min(batchThreads, list.size()));
+                        int chunkSize = (int) Math.ceil(list.size() / (double) parts);
+                        return chunk(list, chunkSize);
+                    });
 
             log.info("CBR: {} items for {}, {} batches (threads={})",
-                    list.size(), asOf, batches.size(), parts);
+                    list.size(), asOf, batches.size(), Math.min(batchThreads, list.size()));
+
+            // ✅ фикс: создаём snapshot, который будем протаскивать в потоки пула
+            ContextSnapshot snapshot = ContextSnapshot.captureAll();
 
             List<CompletableFuture<Integer>> futures = new ArrayList<>(batches.size());
+
             for (List<CbrClient.CbrRate> batch : batches) {
                 List<CbrClient.CbrRate> safeCopy = new ArrayList<>(batch);
-                futures.add(CompletableFuture.supplyAsync(
-                        () -> runInNewTx(() -> processBatch(safeCopy, asOf)),
-                        ioPool
-                ));
+
+                // ✅ фикс: явно делаем Callable<Integer>, тогда у результата есть .call()
+                Callable<Integer> task = snapshot.wrap(() ->
+                        runInNewTx(() -> processBatch(safeCopy, asOf))
+                );
+
+                futures.add(CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return task.call();
+                    } catch (Exception e) {
+                        throw new CompletionException(e);
+                    }
+                }, ioPool));
             }
 
             int totalSaved = futures.stream().mapToInt(CompletableFuture::join).sum();
@@ -133,12 +167,22 @@ public class RateUpdateService {
     }
 
     private <T> T runInNewTx(Supplier<T> task) {
-        TransactionTemplate tt = new TransactionTemplate(txManager);
-        tt.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
-        return tt.execute((TransactionStatus status) -> task.get());
+        return Observation.createNotStarted("tx.requires_new", observationRegistry)
+                .observe(() -> {
+                    TransactionTemplate tt = new TransactionTemplate(txManager);
+                    tt.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+                    return tt.execute((TransactionStatus status) -> task.get());
+                });
     }
 
     private int processBatch(List<CbrClient.CbrRate> batch, LocalDate asOf) {
+        return Observation.createNotStarted("cbr.processBatch", observationRegistry)
+                .lowCardinalityKeyValue("batchSize", String.valueOf(batch.size()))
+                .lowCardinalityKeyValue("asOf", String.valueOf(asOf))
+                .observe(() -> doProcessBatch(batch, asOf));
+    }
+
+    private int doProcessBatch(List<CbrClient.CbrRate> batch, LocalDate asOf) {
         Timer.Sample batchSample = Timer.start(meterRegistry);
 
         log.info("batch start: size={}, date={}, thread={}", batch.size(), asOf, Thread.currentThread().getName());
@@ -149,53 +193,67 @@ public class RateUpdateService {
                 return 0;
             }
 
-            // Собираем коды батча
-            Set<String> codes = new HashSet<>(batch.size());
-            for (CbrClient.CbrRate dto : batch) {
-                codes.add(dto.code());
-            }
+            Set<String> codes = Observation.createNotStarted("cbr.batch.collectCodes", observationRegistry)
+                    .observe(() -> {
+                        Set<String> out = new HashSet<>(batch.size());
+                        for (CbrClient.CbrRate dto : batch) out.add(dto.code());
+                        return out;
+                    });
 
-            Set<String> existingCodes = repo.findCodesByAsOfDateAndCodeIn(asOf, codes);
+            Set<String> existingCodes = Observation.createNotStarted("db.read.existingCodes", observationRegistry)
+                    .lowCardinalityKeyValue("codes", String.valueOf(codes.size()))
+                    .observe(() -> repo.findCodesByAsOfDateAndCodeIn(asOf, codes));
 
-            List<CurrencyRate> prevList = repo.findAllPrevForCodes(asOf, codes);
+            List<CurrencyRate> prevList = Observation.createNotStarted("db.read.prevRates", observationRegistry)
+                    .lowCardinalityKeyValue("codes", String.valueOf(codes.size()))
+                    .observe(() -> repo.findAllPrevForCodes(asOf, codes));
+
             Map<String, java.math.BigDecimal> prevByCode = new HashMap<>();
             for (CurrencyRate r : prevList) {
                 prevByCode.putIfAbsent(r.getCode(), r.getRateToRub());
             }
 
-            // Готовим список новых сущностей без запросов в цикле
-            List<CurrencyRate> toSave = new ArrayList<>(batch.size());
-            for (CbrClient.CbrRate dto : batch) {
-                final String code = dto.code();
-                if (existingCodes.contains(code)) {
-                    continue;
-                }
+            List<CurrencyRate> toSave = Observation.createNotStarted("cbr.batch.buildEntities", observationRegistry)
+                    .observe(() -> {
+                        List<CurrencyRate> out = new ArrayList<>(batch.size());
 
-                var curr = dto.rate();
-                var prev = prevByCode.get(code);
+                        for (CbrClient.CbrRate dto : batch) {
+                            final String code = dto.code();
+                            if (existingCodes.contains(code)) continue;
 
-                var changeAbs = (prev == null) ? java.math.BigDecimal.ZERO : curr.subtract(prev);
-                var changePct = (prev == null || prev.signum() == 0)
-                        ? java.math.BigDecimal.ZERO
-                        : changeAbs.divide(prev, 8, RoundingMode.HALF_UP)
-                        .multiply(java.math.BigDecimal.valueOf(100));
+                            var curr = dto.rate();
+                            var prev = prevByCode.get(code);
 
-                toSave.add(CurrencyRate.builder()
-                        .code(code)
-                        .name(dto.name())
-                        .nominal(dto.nominal())
-                        .rateToRub(curr)
-                        .asOfDate(asOf)
-                        .changeAbs(changeAbs)
-                        .changePct(changePct)
-                        .build());
-            }
+                            var changeAbs = (prev == null) ? java.math.BigDecimal.ZERO : curr.subtract(prev);
+                            var changePct = (prev == null || prev.signum() == 0)
+                                    ? java.math.BigDecimal.ZERO
+                                    : changeAbs.divide(prev, 8, RoundingMode.HALF_UP)
+                                    .multiply(java.math.BigDecimal.valueOf(100));
 
-            // Одна пачка записи в БД
+                            out.add(CurrencyRate.builder()
+                                    .code(code)
+                                    .name(dto.name())
+                                    .nominal(dto.nominal())
+                                    .rateToRub(curr)
+                                    .asOfDate(asOf)
+                                    .changeAbs(changeAbs)
+                                    .changePct(changePct)
+                                    .build());
+                        }
+                        return out;
+                    });
+
             int saved = 0;
+
             if (!toSave.isEmpty()) {
                 try {
-                    repo.saveAll(toSave);
+                    Observation.createNotStarted("db.write.saveAll", observationRegistry)
+                            .lowCardinalityKeyValue("rows", String.valueOf(toSave.size()))
+                            .observe(() -> {
+                                repo.saveAll(toSave);
+                                return null;
+                            });
+
                     saved = toSave.size();
                 } catch (DataIntegrityViolationException ignore) {
                     dbConflicts.increment();
@@ -209,7 +267,6 @@ public class RateUpdateService {
 
             log.info("Batch persisted: saved={}, date={}", saved, asOf);
             log.info("batch done: saved={}, thread={}", saved, Thread.currentThread().getName());
-            log.info("NEW BATCH LOGIC ENABLED");
             return saved;
 
         } finally {
@@ -219,7 +276,11 @@ public class RateUpdateService {
 
     @Scheduled(fixedDelayString = "${scheduler.update-ms}")
     public void scheduledUpdate() {
-        updateOnce(null);
+        Observation.createNotStarted("scheduler.scheduledUpdate", observationRegistry)
+                .observe(() -> {
+                    updateOnce(null);
+                    return null;
+                });
     }
 
     @Transactional(readOnly = true)
